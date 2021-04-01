@@ -1,0 +1,118 @@
+#a.Part1
+
+# Install the rusquant package from github
+devtools::install_github("arbuzovv/rusquant")
+library(rusquant)
+symbol.vec = c("DASH-USD","XMR-USD")
+getSymbols(symbol.vec,
+           src = "yahoo", from = "2017-01-01", to = "2020-03-20",
+           period = "day"
+)
+
+# extract adjusted closing prices
+`DASH-USD` = `DASH-USD`[, "DASH-USD.Adjusted", drop=F]
+`XMR-USD` = `XMR-USD`[, "XMR-USD.Adjusted", drop=F]
+
+# plot prices
+par(mfrow = c(2, 1))
+plot(`DASH-USD`)
+plot(`XMR-USD`)
+
+# calculate LOG returns
+dash.ret = diff(log(`DASH-USD`))
+xmr.ret = diff(log(`XMR-USD`))
+
+# remove first NA observation
+dash.ret = dash.ret[-1,]
+xmr.ret = xmr.ret[-1,]
+
+# plot log returns
+par(mfrow = c(2, 1))
+plot(dash.ret)
+plot(xmr.ret)
+
+#a Part2
+# Backtesting unconditional VaR models
+# normal VaR, HS and modified HS
+
+# Set up estimation window and testing window
+n.obs = nrow(dash.ret)
+w.e = 500		 # estimation window
+w.t = n.obs - w.e  # test window
+alpha = 0.975
+
+# Loop over testing sample, compute VaR and record hit rates
+backTestVaR <- function(x, p = 0.95) {
+  normal.VaR = as.numeric(VaR(x, p=p, method="gaussian"))
+  historical.VaR = as.numeric(VaR(x, p=p, method="historical"))
+  modified.VaR = as.numeric(VaR(x, p=p, method="modified"))
+  ans = c(normal.VaR, historical.VaR, modified.VaR)
+  names(ans) = c("Normal", "HS", "Modified")
+  return(ans)
+}
+
+# Rolling 1-step ahead estimates of VaR
+# we use 'rollapply', which is a zoo a generic zoo function for applying
+# a function to rolling margins of an array.
+VaR.results = rollapply(as.zoo(dash.ret), width=w.e,
+                        FUN = backTestVaR, p=0.975, by.column = FALSE,
+                        align = "right")
+VaR.results = lag(VaR.results, k=-1)
+chart.TimeSeries(merge(dash.ret, VaR.results), legend.loc="topright")
+
+violations.mat = matrix(0, 3, 5)
+rownames(violations.mat) = c("Normal", "HS", "Modified")
+colnames(violations.mat) = c("En1", "n1", "1-alpha", "Percent", "VR")
+violations.mat[, "En1"] = (1-alpha)*w.t
+violations.mat[, "1-alpha"] = 1 - alpha
+
+# Show Normal VaR violations
+# we use the 'index' zoo function which is a generic function
+# for extracting the index of an object and replacing it.
+normalVaR.violations = as.zoo(dash.ret[index(VaR.results), ]) < VaR.results[, "Normal"]
+violation.dates = index(normalVaR.violations[which(normalVaR.violations)])
+
+# Plot violations
+plot(as.zoo(dash.ret[index(VaR.results),]), col="blue", ylab="Return")
+abline(h=0)
+lines(VaR.results[, "Normal"], col="black", lwd=2)
+lines(as.zoo(dash.ret[violation.dates,]), type="p", pch=16, col="red", lwd=2)
+
+for(i in colnames(VaR.results)) {
+  VaR.violations = as.zoo(dash.ret[index(VaR.results), ]) < VaR.results[, i]
+  violations.mat[i, "n1"] = sum(VaR.violations)
+  violations.mat[i, "Percent"] = sum(VaR.violations)/w.t
+  violations.mat[i, "VR"] = violations.mat[i, "n1"]/violations.mat[i, "En1"]
+}
+violations.mat
+
+?VaRTest
+VaR.test = VaRTest(1-alpha,
+                   actual=coredata(dash.ret[index(VaR.results),]),
+                   VaR=coredata(VaR.results[,"Normal"]))
+names(VaR.test)
+# LR test for correct number of exceedances
+VaR.test[1:7]
+
+# LR tests for independence of exceedances
+VaR.test[8:12]
+
+
+#a Part3 Rolling Student's t GARCH(1,1) with VaR violations
+garch11.t.spec = ugarchspec(variance.model = list(garchOrder=c(1,1)),
+                            mean.model = list(armaOrder=c(0,0)),
+                            distribution.model = "std")
+
+DASH.garch11.t.roll = ugarchroll(garch11.t.spec, dash.ret, n.ahead=1,
+                               forecast.length = w.t,
+                               refit.every=1, refit.window="moving",
+                               calculate.VaR=TRUE, VaR.alpha=0.025)
+
+class(DASH.garch11.t.roll)
+plot(DASH.garch11.t.roll, which=4) #error: VaR.alpha chosen is invalid for the object????
+plot(DASH.garch11.t.roll, which=5)
+
+# show backtesting report
+xx = VaRTest(alpha=0.025, actual=DASH.garch11.t.roll@forecast$VaR[,2],
+             VaR=DASH.garch11.t.roll@forecast$VaR[,1])
+xx
